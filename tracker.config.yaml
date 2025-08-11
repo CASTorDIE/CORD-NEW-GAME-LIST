@@ -1,0 +1,28 @@
+# tracker.config.yaml
+timezone: "America/Chicago"
+delivery_time: "09:00"           # local time for daily report (HH:MM)
+first_day_window_hours: 24        # how long to measure since first seen
+
+newness:
+  method: "first_seen_in_streams"
+  min_concurrent_viewers_seen: 50  # ignore categories that never reach this
+  lookback_days: 7                  # consider “new” if first seen within N days
+
+metrics:
+  include: ["peak_viewers","avg_viewers","hours_watched","total_streams","unique_channels","peak_channels"]
+  polling_interval_minutes: 5
+
+filters:
+  min_peak_viewers: 5000
+  min_hours_watched: 0
+  exclude_categories: ["Just Chatting"]
+
+report:
+  formats: ["csv","markdown"]
+  csv_path: "/data/reports"
+  post_here_summary: false   # set true if you’ll wire a chat/webhook later
+
+alerts:
+  enabled: false
+  threshold_peak_viewers: 25000
+  webhook_url: ""
