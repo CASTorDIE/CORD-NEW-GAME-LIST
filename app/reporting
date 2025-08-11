@@ -1,0 +1,78 @@
+import csv
+import os
+from datetime import datetime, timedelta
+import pytz
+from typing import Dict, List
+
+from .storage import conn
+
+def _window_bounds(first_seen_ts: int, hours: int) -> (int, int):
+    start = first_seen_ts
+    end = first_seen_ts + hours*3600
+    return start, end
+
+def compute_first_day_stats(cfg: Dict, report_date_local: datetime) -> List[Dict]:
+    tz = pytz.timezone(cfg["timezone"])
+    hours = int(cfg["first_day_window_hours"])
+    # consider games first seen within lookback_days
+    lookback_days = int(cfg["newness"].get("lookback_days", 7))
+    start_cutoff = int((report_date_local - timedelta(days=lookback_days)).timestamp())
+
+    rows = []
+    with conn() as c:
+        cur = c.execute("SELECT game_id, game_name, first_seen_ts FROM stream_seen WHERE first_seen_ts >= ?",
+                        (start_cutoff,))
+        for gid, gname, first_seen_ts in cur.fetchall():
+            win_start, win_end = _window_bounds(first_seen_ts, hours)
+            scur = c.execute(
+                "SELECT viewers, channels FROM stats_samples WHERE game_id=? AND ts BETWEEN ? AND ?",
+                (gid, win_start, win_end)
+            )
+            samples = scur.fetchall()
+            if not samples:
+                continue
+            peak_v = max(v for v, ch in samples)
+            avg_v = sum(v for v, ch in samples) / len(samples)
+            peak_ch = max(ch for v, ch in samples)
+            unique_channels = 0
+            total_streams = 0
+            # Approximation using channels samples
+            unique_channels = peak_ch  # lower-bound; true unique needs per-channel IDs
+            total_streams = sum(1 for _ in samples)  # sample-count proxy
+            hours_watched = avg_v * (hours)
+            rows.append({
+                "game_id": gid,
+                "game_name": gname,
+                "peak_viewers": int(peak_v),
+                "avg_viewers": round(avg_v, 1),
+                "hours_watched": round(hours_watched, 1),
+                "total_streams": int(total_streams),
+                "unique_channels": int(unique_channels),
+                "peak_channels": int(peak_ch),
+                "first_seen_ts": first_seen_ts
+            })
+    # filters
+    min_peak = int(cfg["filters"].get("min_peak_viewers", 0))
+    min_hours = float(cfg["filters"].get("min_hours_watched", 0))
+    excl = set(cfg["filters"].get("exclude_categories", []))
+    rows = [r for r in rows if r["peak_viewers"] >= min_peak and r["hours_watched"] >= min_hours and r["game_name"] not in excl]
+    # visibility threshold
+    min_seen_v = int(cfg["newness"].get("min_concurrent_viewers_seen", 0))
+    rows = [r for r in rows if r["peak_viewers"] >= min_seen_v]
+    # sort by peak viewers desc
+    rows.sort(key=lambda r: r["peak_viewers"], reverse=True)
+    return rows
+
+def write_csv(cfg: Dict, report_rows: List[Dict], report_date_local: datetime) -> str:
+    outdir = cfg["report"].get("csv_path", "/data/reports")
+    os.makedirs(outdir, exist_ok=True)
+    fname = f"new_games_{report_date_local.strftime('%Y-%m-%d')}.csv"
+    fpath = os.path.join(outdir, fname)
+    with open(fpath, "w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(["date_seen","game_id","game_name","peak_viewers","avg_viewers","hours_watched","total_streams","unique_channels","peak_channels"])
+        for r in report_rows:
+            date_seen = datetime.fromtimestamp(r["first_seen_ts"]).strftime('%Y-%m-%d')
+            w.writerow([date_seen, r["game_id"], r["game_name"], r["peak_viewers"], r["avg_viewers"], r["hours_watched"], r["total_streams"], r["unique_channels"], r["peak_channels"])
+                      )
+    return fpath
